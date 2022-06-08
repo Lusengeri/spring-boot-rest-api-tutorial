@@ -11,7 +11,7 @@ terraform {
 
 variable "region" {
     description = "The region to deploy the application"
-    default = "us-east-1"
+    default = "us-west-2"
 }
 
 variable "db_username" {
@@ -45,6 +45,12 @@ resource "aws_ssm_parameter" "spring_boot_rest_api_db_password" {
     name  = "spring-boot-rest-api-db-password"
     type  = "String"
     value = var.db_password
+}
+
+resource "aws_ssm_parameter" "spring_boot_rest_api_region" {
+    name  = "spring-boot-rest-api-db-region"
+    type  = "String"
+    value = var.region
 }
 
 resource "aws_vpc" "vpc" {
@@ -214,6 +220,14 @@ resource "aws_security_group" "webservers_sg" {
     }
 
     ingress {
+        description = "allow connections to Tomcat REST API from ELB"
+        protocol = "tcp"
+        from_port = 8080
+        to_port = 8080
+        security_groups = [aws_security_group.elb_sg.id]
+    }
+
+    ingress {
         description = "allow SSH from the bastion host"
         protocol = "tcp"
         from_port = 22
@@ -240,8 +254,8 @@ resource "aws_security_group" "db_sg" {
     ingress {
         description = "allow webservers group to connect to postgresql"
         protocol = "tcp"
-        from_port = 5432 
-        to_port = 5432 
+        from_port = 3306 
+        to_port = 3306 
         security_groups = [aws_security_group.webservers_sg.id]
     }
 
@@ -310,16 +324,22 @@ resource "aws_instance" "bastion_host" {
     }
 }
 
+resource "aws_iam_instance_profile" "instance_profile" {
+    name = "instance_profile"
+    role = aws_iam_role.instance_role.name
+}
+
 resource "aws_launch_template" "webservers_template" {
     name = "server-template"
 
     iam_instance_profile {
-        name = "instance-role"
+        name = aws_iam_instance_profile.instance_profile.name
     }
 
     image_id = "ami-0cb4e786f15603b0d"
     instance_type = "t2.micro"
     key_name = var.key_name 
+    user_data = filebase64("${path.module}/scripts/setup.sh")
     vpc_security_group_ids = [ aws_security_group.webservers_sg.id ] 
 
     tag_specifications {
@@ -356,7 +376,7 @@ resource "aws_autoscaling_policy" "cpu_usage_policy" {
     name                   = "cpu_usage_policy"
     autoscaling_group_name = aws_autoscaling_group.webservers_asg.name
     adjustment_type        = "ChangeInCapacity"
-    cooldown               = 300
+    #cooldown               = 300
     policy_type = "TargetTrackingScaling"
 
     target_tracking_configuration {
@@ -400,13 +420,13 @@ resource "aws_db_instance" "api_db" {
     allocated_storage    = 10
     db_name              = "taskmanagerdb"
     db_subnet_group_name = aws_db_subnet_group.db_subnet_group.name
-    engine               = "postgres"
-    engine_version       = "13.6"
+    engine               = "mysql"
+    engine_version       = "8.0"
     instance_class       = "db.t3.micro"
     multi_az = false
     username             = "ubuntu"
     password             = "password"
-    port = 5432
+    port = 3306 
     skip_final_snapshot  = true
     vpc_security_group_ids = [ aws_security_group.db_sg.id ]
 }
@@ -418,5 +438,5 @@ resource "aws_ssm_parameter" "sprint_boot_rest_api_db_host" {
 }
 
 output "elb_endpoint" {
-    value = aws_lb.elb.webservers_elb.dns_name
+    value = aws_lb.webservers_elb.dns_name
 }
