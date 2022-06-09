@@ -9,11 +9,6 @@ terraform {
 
 # Declare variables
 
-variable "region" {
-    description = "The region to deploy the application"
-    default = "us-west-2"
-}
-
 variable "db_username" {
     description = "The username to be used for database access"
 }
@@ -23,14 +18,7 @@ variable "db_password" {
 }
 
 variable "key_name" {
-    description = "The SSK key used to access instances"
-}
-
-# Configure AWS provider
-
-provider "aws" {
-    profile = "default"
-    region = var.region 
+    description = "The SSH key used to access instances"
 }
 
 # Store SSM parameters
@@ -45,12 +33,6 @@ resource "aws_ssm_parameter" "spring_boot_rest_api_db_password" {
     name  = "spring-boot-rest-api-db-password"
     type  = "String"
     value = var.db_password
-}
-
-resource "aws_ssm_parameter" "spring_boot_rest_api_region" {
-    name  = "spring-boot-rest-api-db-region"
-    type  = "String"
-    value = var.region
 }
 
 resource "aws_vpc" "vpc" {
@@ -171,6 +153,14 @@ resource "aws_security_group" "elb_sg" {
         cidr_blocks = ["0.0.0.0/0"]
     }
 
+    ingress {
+        description = "allow connections from the internet"
+        protocol = "tcp"
+        from_port = 8080 
+        to_port = 8080 
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+
     egress {
         from_port = 0
         to_port = 0
@@ -216,15 +206,17 @@ resource "aws_security_group" "webservers_sg" {
         protocol = "tcp"
         from_port = 80
         to_port = 80
-        security_groups = [aws_security_group.elb_sg.id]
+        cidr_blocks = ["0.0.0.0/0"]
+        #security_groups = [aws_security_group.elb_sg.id]
     }
 
     ingress {
-        description = "allow connections to Tomcat REST API from ELB"
+        description = "allow connections to Tomcat from ELB"
         protocol = "tcp"
         from_port = 8080
         to_port = 8080
-        security_groups = [aws_security_group.elb_sg.id]
+        cidr_blocks = ["0.0.0.0/0"]
+        #security_groups = [aws_security_group.elb_sg.id]
     }
 
     ingress {
@@ -257,6 +249,13 @@ resource "aws_security_group" "db_sg" {
         from_port = 3306 
         to_port = 3306 
         security_groups = [aws_security_group.webservers_sg.id]
+    }
+
+    egress {
+        from_port = 0
+        to_port = 0
+        protocol = -1
+        cidr_blocks = ["0.0.0.0/0"]
     }
 
     tags = {
@@ -309,6 +308,21 @@ resource "aws_iam_role" "instance_role" {
             ]
         })
     }
+
+    inline_policy {
+        name = "ssm_access"
+
+        policy = jsonencode({
+            Version = "2012-10-17"
+            Statement = [
+                {
+                    Action   = ["ssm:*" ]
+                    Effect   = "Allow"
+                    Resource = "*"
+                },
+            ]
+        })
+    }
 }
 
 resource "aws_instance" "bastion_host" {
@@ -338,9 +352,9 @@ resource "aws_launch_template" "webservers_template" {
 
     image_id = "ami-0cb4e786f15603b0d"
     instance_type = "t2.micro"
-    key_name = var.key_name 
+    key_name = var.key_name
     user_data = filebase64("${path.module}/scripts/setup.sh")
-    vpc_security_group_ids = [ aws_security_group.webservers_sg.id ] 
+    vpc_security_group_ids = [ aws_security_group.webservers_sg.id ]
 
     tag_specifications {
         resource_type = "instance"
@@ -353,7 +367,7 @@ resource "aws_launch_template" "webservers_template" {
 
 resource "aws_lb_target_group" "autoscaling_tg" {
     name     = "autoscaling-tg"
-    port     = 80
+    port     = 8080
     protocol = "HTTP"
     vpc_id   = aws_vpc.vpc.id
 }
@@ -370,6 +384,13 @@ resource "aws_autoscaling_group" "webservers_asg" {
         id      = aws_launch_template.webservers_template.id
         version = "$Latest"
     }
+
+    depends_on = [
+        aws_ssm_parameter.spring_boot_rest_api_db_username,
+        aws_ssm_parameter.spring_boot_rest_api_db_password,
+        aws_ssm_parameter.sprint_boot_rest_api_db_host,
+        aws_db_instance.api_db
+    ]
 }
 
 resource "aws_autoscaling_policy" "cpu_usage_policy" {
@@ -398,7 +419,7 @@ resource "aws_lb" "webservers_elb" {
 
 resource "aws_lb_listener" "back_end" {
     load_balancer_arn = aws_lb.webservers_elb.arn
-    port              = "80"
+    port              = "8080"
     protocol          = "HTTP"
 
     default_action {
@@ -418,14 +439,14 @@ resource "aws_db_subnet_group" "db_subnet_group" {
 
 resource "aws_db_instance" "api_db" {
     allocated_storage    = 10
-    db_name              = "taskmanagerdb"
+    db_name              = "user_database"
     db_subnet_group_name = aws_db_subnet_group.db_subnet_group.name
     engine               = "mysql"
     engine_version       = "8.0"
     instance_class       = "db.t3.micro"
     multi_az = false
-    username             = "ubuntu"
-    password             = "password"
+    username             = var.db_username 
+    password             = var.db_password
     port = 3306 
     skip_final_snapshot  = true
     vpc_security_group_ids = [ aws_security_group.db_sg.id ]
